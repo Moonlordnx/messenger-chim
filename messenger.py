@@ -1,228 +1,534 @@
+import sys
 import socket
 import threading
 import struct
-import time
 from datetime import datetime
-import tkinter as tk
-from tkinter import ttk, scrolledtext, messagebox
+from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
+                             QHBoxLayout, QLabel, QLineEdit, QPushButton, 
+                             QScrollArea, QFrame, QSizePolicy)
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal, QPropertyAnimation, QEasingCurve, QRect
+from PyQt5.QtGui import QFont
 
-class ChimMessenger:
-    def __init__(self, root):
-        self.root = root
-        self.root.title("Chim Messenger")
-        self.root.geometry("600x500")
-        self.root.configure(bg='#2b2b2b')
-        
-        # Переменные для подключения
-        self.workstation_id = ""
-        self.messenger = None
-        self.running = False
-        
+# Игнорирование предупреждений о deprecated функциях
+import warnings
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+
+def get_local_ip():
+    """Получение локального IP-адреса компьютера"""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("8.8.8.8", 80))
+            return s.getsockname()[0]
+    except Exception:
+        return "unknown"
+
+class MessageBubble(QFrame):
+    def __init__(self, message, is_own, sender, timestamp, parent=None):
+        super().__init__(parent)
+        self.message = message
+        self.is_own = is_own
+        self.sender = sender
+        self.timestamp = timestamp
         self.setup_ui()
         
     def setup_ui(self):
-        """Настройка пользовательского интерфейса"""
+        self.setMaximumWidth(400)
+        self.setMinimumWidth(100)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        
+        layout = QVBoxLayout()
+        layout.setContentsMargins(15, 8, 15, 8)
+        layout.setSpacing(4)
+        
+        # Отправитель (только для чужих сообщений)
+        if not self.is_own:
+            sender_label = QLabel(self.sender)
+            sender_label.setStyleSheet("""
+                QLabel {
+                    color: #0088cc;
+                    font-weight: bold;
+                    font-size: 13px;
+                    padding: 0px;
+                }
+            """)
+            layout.addWidget(sender_label)
+        
+        # Текст сообщения
+        message_label = QLabel(self.message)
+        message_label.setWordWrap(True)
+        message_label.setStyleSheet("""
+            QLabel {
+                color: white;
+                font-size: 14px;
+                padding: 0px;
+                background: transparent;
+            }
+        """)
+        layout.addWidget(message_label)
+        
+        # Время отправки
+        time_label = QLabel(self.timestamp)
+        time_label.setStyleSheet("""
+            QLabel {
+                color: #aaaaaa;
+                font-size: 11px;
+                padding: 0px;
+                background: transparent;
+            }
+        """)
+        time_label.setAlignment(Qt.AlignRight if self.is_own else Qt.AlignLeft)
+        layout.addWidget(time_label)
+        
+        self.setLayout(layout)
+        
+        # Стиль bubble
+        if self.is_own:
+            self.setStyleSheet("""
+                QFrame {
+                    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #0088cc, stop:1 #00a884);
+                    border-radius: 18px;
+                    border: none;
+                    padding: 0px;
+                }
+            """)
+        else:
+            self.setStyleSheet("""
+                QFrame {
+                    background: #2b5278;
+                    border-radius: 18px;
+                    border: none;
+                    padding: 0px;
+                }
+            """)
+
+class AnimatedButton(QPushButton):
+    def __init__(self, text, parent=None):
+        super().__init__(text, parent)
+        self._animation = QPropertyAnimation(self, b"geometry")
+        self._animation.setDuration(200)
+        self._animation.setEasingCurve(QEasingCurve.OutCubic)
+        
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self.animate_click()
+        super().mousePressEvent(event)
+        
+    def animate_click(self):
+        original_geometry = self.geometry()
+        pressed_geometry = QRect(
+            original_geometry.x() + 2,
+            original_geometry.y() + 2,
+            original_geometry.width() - 4,
+            original_geometry.height() - 4
+        )
+        
+        self._animation.setStartValue(original_geometry)
+        self._animation.setEndValue(pressed_geometry)
+        self._animation.start()
+
+class LoginWindow(QMainWindow):
+    login_success = pyqtSignal(str)
+    
+    def __init__(self):
+        super().__init__()
+        self.setup_ui()
+        
+    def setup_ui(self):
+        self.setWindowTitle("Chim Messenger - Авторизация")
+        self.setFixedSize(400, 500)
+        self.setStyleSheet("""
+            QMainWindow {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                stop:0 #1e3c72, stop:1 #2a5298);
+            }
+        """)
+        
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+        
+        layout = QVBoxLayout()
+        layout.setAlignment(Qt.AlignCenter)
+        layout.setSpacing(30)
+        
         # Заголовок
-        title_frame = tk.Frame(self.root, bg='#2b2b2b')
-        title_frame.pack(pady=10)
+        title_label = QLabel("Chim Messenger")
+        title_label.setAlignment(Qt.AlignCenter)
+        title_label.setStyleSheet("""
+            QLabel {
+                color: white;
+                font-size: 32px;
+                font-weight: bold;
+                padding: 20px;
+            }
+        """)
+        layout.addWidget(title_label)
         
-        title_label = tk.Label(
-            title_frame, 
-            text="Chim Messenger", 
-            font=('Arial', 20, 'bold'),
-            fg='#4fc3f7',
-            bg='#2b2b2b'
-        )
-        title_label.pack()
+        # Иконка
+        icon_label = QLabel("💬")
+        icon_label.setAlignment(Qt.AlignCenter)
+        icon_label.setStyleSheet("""
+            QLabel {
+                color: white;
+                font-size: 64px;
+                padding: 20px;
+            }
+        """)
+        layout.addWidget(icon_label)
         
-        subtitle_label = tk.Label(
-            title_frame,
-            text="Быстрое и легкое общение",
-            font=('Arial', 10),
-            fg='#b0bec5',
-            bg='#2b2b2b'
-        )
-        subtitle_label.pack()
+        # Подзаголовок
+        subtitle_label = QLabel("Современный локальный мессенджер")
+        subtitle_label.setAlignment(Qt.AlignCenter)
+        subtitle_label.setStyleSheet("""
+            QLabel {
+                color: #cccccc;
+                font-size: 16px;
+                padding: 10px;
+            }
+        """)
+        layout.addWidget(subtitle_label)
         
-        # Фрейм подключения
-        self.connection_frame = tk.Frame(self.root, bg='#37474f', relief='ridge', bd=2)
-        self.connection_frame.pack(pady=10, padx=20, fill='x')
+        # Поле ввода
+        input_widget = QWidget()
+        input_layout = QVBoxLayout()
+        input_layout.setSpacing(10)
         
-        tk.Label(
-            self.connection_frame,
-            text="Подключение к чату",
-            font=('Arial', 12, 'bold'),
-            fg='#ffffff',
-            bg='#37474f'
-        ).pack(pady=5)
+        ip_label = QLabel("Ваш идентификатор:")
+        ip_label.setStyleSheet("""
+            QLabel {
+                color: white;
+                font-size: 14px;
+                font-weight: bold;
+            }
+        """)
+        input_layout.addWidget(ip_label)
         
-        input_frame = tk.Frame(self.connection_frame, bg='#37474f')
-        input_frame.pack(pady=10)
+        self.ip_entry = QLineEdit()
+        self.ip_entry.setText(get_local_ip())
+        self.ip_entry.setStyleSheet("""
+            QLineEdit {
+                background: rgba(255,255,255,0.1);
+                border: 2px solid rgba(255,255,255,0.3);
+                border-radius: 20px;
+                padding: 15px;
+                color: white;
+                font-size: 14px;
+                selection-background-color: #0088cc;
+            }
+            QLineEdit:focus {
+                border: 2px solid #0088cc;
+            }
+        """)
+        self.ip_entry.returnPressed.connect(self.login)
+        input_layout.addWidget(self.ip_entry)
         
-        tk.Label(
-            input_frame,
-            text="Ваш идентификатор:",
-            font=('Arial', 10),
-            fg='#ffffff',
-            bg='#37474f'
-        ).grid(row=0, column=0, padx=5)
+        input_widget.setLayout(input_layout)
+        layout.addWidget(input_widget)
         
-        self.id_entry = tk.Entry(input_frame, width=20, font=('Arial', 10))
-        self.id_entry.grid(row=0, column=1, padx=5)
-        self.id_entry.bind('<Return>', lambda e: self.connect_to_chat())
+        # Кнопка входа
+        self.login_btn = AnimatedButton("Подключиться к чату")
+        self.login_btn.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                stop:0 #0088cc, stop:1 #00a884);
+                color: white;
+                border: none;
+                border-radius: 25px;
+                padding: 15px;
+                font-size: 16px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                stop:0 #0095e0, stop:1 #00b894);
+            }
+            QPushButton:pressed {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                stop:0 #0077b3, stop:1 #009670);
+            }
+        """)
+        self.login_btn.setFixedHeight(50)
+        self.login_btn.clicked.connect(self.login)
+        layout.addWidget(self.login_btn)
         
-        self.connect_btn = tk.Button(
-            input_frame,
-            text="Подключиться",
-            command=self.connect_to_chat,
-            bg='#4caf50',
-            fg='white',
-            font=('Arial', 10, 'bold'),
-            width=12
-        )
-        self.connect_btn.grid(row=0, column=2, padx=10)
+        # Информация
+        info_label = QLabel("💡 Автоматически определен ваш IP-адрес")
+        info_label.setAlignment(Qt.AlignCenter)
+        info_label.setStyleSheet("""
+            QLabel {
+                color: #aaaaaa;
+                font-size: 12px;
+                padding: 10px;
+            }
+        """)
+        layout.addWidget(info_label)
         
-        # Фрейм чата (изначально скрыт)
-        self.chat_frame = tk.Frame(self.root, bg='#2b2b2b')
+        central_widget.setLayout(layout)
+        
+    def login(self):
+        username = self.ip_entry.text().strip()
+        if username:
+            self.login_success.emit(username)
+
+class ChatWindow(QMainWindow):
+    message_received = pyqtSignal(str, str, bool)
+    
+    def __init__(self, username):
+        super().__init__()
+        self.username = username
+        self.messenger = None
+        self.setup_ui()
+        self.setup_chat()
+        
+        self.message_received.connect(self.add_message)
+        
+    def setup_ui(self):
+        self.setWindowTitle(f"Chim Messenger - {self.username}")
+        self.setGeometry(100, 100, 400, 700)
+        self.setMinimumSize(350, 500)
+        
+        # Основной стиль
+        self.setStyleSheet("""
+            QMainWindow {
+                background: #0e1621;
+            }
+            QScrollArea {
+                border: none;
+                background: transparent;
+            }
+            QScrollBar:vertical {
+                background: #1e2b3c;
+                width: 8px;
+                margin: 0px;
+                border-radius: 4px;
+            }
+            QScrollBar::handle:vertical {
+                background: #2b5278;
+                border-radius: 4px;
+                min-height: 20px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: #3d6b99;
+            }
+        """)
+        
+        central_widget = QWidget()
+        self.setCentralWidget(central_widget)
+        
+        self.main_layout = QVBoxLayout()
+        self.main_layout.setContentsMargins(0, 0, 0, 0)
+        self.main_layout.setSpacing(0)
+        
+        # Заголовок чата
+        self.create_header()
         
         # Область сообщений
-        self.messages_area = scrolledtext.ScrolledText(
-            self.chat_frame,
-            wrap=tk.WORD,
-            width=60,
-            height=20,
-            font=('Arial', 10),
-            bg='#1e1e1e',
-            fg='#e0e0e0',
-            state='disabled'
-        )
-        self.messages_area.pack(pady=10, padx=20, fill='both', expand=True)
+        self.create_messages_area()
         
-        # Фрейм ввода сообщения
-        input_frame = tk.Frame(self.chat_frame, bg='#2b2b2b')
-        input_frame.pack(pady=10, padx=20, fill='x')
+        # Панель ввода
+        self.create_input_panel()
         
-        self.message_entry = tk.Entry(
-            input_frame,
-            font=('Arial', 12),
-            bg='#37474f',
-            fg='white',
-            insertbackground='white'
-        )
-        self.message_entry.pack(side='left', fill='x', expand=True, padx=(0, 10))
-        self.message_entry.bind('<Return>', lambda e: self.send_message())
+        central_widget.setLayout(self.main_layout)
         
-        self.send_btn = tk.Button(
-            input_frame,
-            text="Отправить",
-            command=self.send_message,
-            bg='#2196f3',
-            fg='white',
-            font=('Arial', 10, 'bold'),
-            width=10
-        )
-        self.send_btn.pack(side='right')
+    def create_header(self):
+        header = QWidget()
+        header.setFixedHeight(60)
+        header.setStyleSheet("""
+            QWidget {
+                background: #1e2b3c;
+                border-bottom: 1px solid #2b5278;
+            }
+        """)
         
-        # Статус бар
-        self.status_var = tk.StringVar(value="Не подключено")
-        status_bar = tk.Label(
-            self.root,
-            textvariable=self.status_var,
-            relief='sunken',
-            anchor='w',
-            font=('Arial', 9),
-            bg='#263238',
-            fg='#cfd8dc'
-        )
-        status_bar.pack(side='bottom', fill='x')
+        header_layout = QHBoxLayout()
+        header_layout.setContentsMargins(20, 10, 20, 10)
         
-    def connect_to_chat(self):
-        """Подключение к multicast чату"""
-        self.workstation_id = self.id_entry.get().strip()
+        title_label = QLabel("Групповой чат")
+        title_label.setStyleSheet("""
+            QLabel {
+                color: white;
+                font-size: 16px;
+                font-weight: bold;
+            }
+        """)
+        header_layout.addWidget(title_label)
         
-        if not self.workstation_id:
-            messagebox.showerror("Ошибка", "Введите идентификатор")
-            return
+        self.status_label = QLabel("● онлайн")
+        self.status_label.setStyleSheet("""
+            QLabel {
+                color: #00d465;
+                font-size: 12px;
+            }
+        """)
+        header_layout.addWidget(self.status_label)
         
+        header.setLayout(header_layout)
+        self.main_layout.addWidget(header)
+        
+    def create_messages_area(self):
+        self.scroll_area = QScrollArea()
+        self.scroll_area.setWidgetResizable(True)
+        self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        
+        self.messages_widget = QWidget()
+        self.messages_layout = QVBoxLayout()
+        self.messages_layout.setAlignment(Qt.AlignTop)
+        self.messages_layout.setSpacing(8)
+        self.messages_layout.setContentsMargins(15, 15, 15, 15)
+        
+        self.messages_widget.setLayout(self.messages_layout)
+        self.scroll_area.setWidget(self.messages_widget)
+        
+        self.main_layout.addWidget(self.scroll_area)
+        
+    def create_input_panel(self):
+        input_widget = QWidget()
+        input_widget.setFixedHeight(80)
+        input_widget.setStyleSheet("""
+            QWidget {
+                background: #1e2b3c;
+                border-top: 1px solid #2b5278;
+            }
+        """)
+        
+        input_layout = QHBoxLayout()
+        input_layout.setContentsMargins(15, 15, 15, 15)
+        input_layout.setSpacing(10)
+        
+        self.message_input = QLineEdit()
+        self.message_input.setPlaceholderText("Введите сообщение...")
+        self.message_input.setStyleSheet("""
+            QLineEdit {
+                background: #2b5278;
+                border: none;
+                border-radius: 20px;
+                padding: 12px 20px;
+                color: white;
+                font-size: 14px;
+                selection-background-color: #0088cc;
+            }
+            QLineEdit:focus {
+                border: none;
+            }
+        """)
+        self.message_input.returnPressed.connect(self.send_message)
+        input_layout.addWidget(self.message_input)
+        
+        self.send_btn = AnimatedButton("↑")
+        self.send_btn.setFixedSize(50, 50)
+        self.send_btn.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                stop:0 #0088cc, stop:1 #00a884);
+                color: white;
+                border: none;
+                border-radius: 25px;
+                font-size: 18px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                stop:0 #0095e0, stop:1 #00b894);
+            }
+            QPushButton:pressed {
+                background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
+                stop:0 #0077b3, stop:1 #009670);
+            }
+        """)
+        self.send_btn.clicked.connect(self.send_message)
+        input_layout.addWidget(self.send_btn)
+        
+        input_widget.setLayout(input_layout)
+        self.main_layout.addWidget(input_widget)
+        
+    def setup_chat(self):
         try:
-            self.messenger = MulticastMessenger(self.workstation_id)
-            self.running = True
-            
+            self.messenger = MulticastMessenger(self.username)
             # Запуск потока для прослушивания сообщений
-            self.listener_thread = threading.Thread(target=self.listen_messages)
-            self.listener_thread.daemon = True
+            self.listener_thread = threading.Thread(target=self.listen_messages, daemon=True)
             self.listener_thread.start()
             
-            # Переключение на интерфейс чата
-            self.connection_frame.pack_forget()
-            self.chat_frame.pack(fill='both', expand=True)
-            self.status_var.set(f"Подключено как: {self.workstation_id}")
-            
+            # Добавляем приветственное сообщение
             self.add_system_message("Вы подключились к чату")
-            
         except Exception as e:
-            messagebox.showerror("Ошибка подключения", f"Не удалось подключиться: {e}")
-    
+            self.add_system_message(f"Ошибка подключения: {str(e)}")
+        
     def send_message(self):
-        """Отправка сообщения"""
-        message = self.message_entry.get().strip()
+        message = self.message_input.text().strip()
         if message and self.messenger:
-            # Сразу показываем свое сообщение в чате
-            self.add_message(self.workstation_id, message)
-            self.messenger.send_message(message)
-            self.message_entry.delete(0, tk.END)
-    
-    def listen_messages(self):
-        """Прослушивание входящих сообщений"""
-        while self.running and self.messenger:
             try:
-                data, addr = self.messenger.sock.recvfrom(1024)
-                message = data.decode('utf-8')
+                self.add_message(self.username, message, True)
+                self.messenger.send_message(message)
+                self.message_input.clear()
+            except Exception as e:
+                self.add_system_message(f"Ошибка отправки: {str(e)}")
+            
+    def listen_messages(self):
+        while self.messenger and getattr(self.messenger, 'running', True):
+            try:
+                data, addr = self.messenger.sock.recvfrom(4096)
+                message = data.decode('utf-8', errors='ignore')
+                
                 if ':' in message:
                     workstation, msg = message.split(':', 1)
-                    if workstation != self.workstation_id:  # Не показывать свои же сообщения
-                        # Используем after для безопасного обновления GUI из другого потока
-                        self.root.after(0, self.add_message, workstation, msg)
+                    if workstation != self.username:
+                        self.message_received.emit(workstation, msg, False)
+                        
+            except socket.timeout:
+                continue
             except Exception as e:
-                if self.running:
-                    print(f"Ошибка приема: {e}")
-    
-    def add_message(self, sender, message):
-        """Добавление сообщения в чат"""
-        self.messages_area.configure(state='normal')
+                if self.messenger and getattr(self.messenger, 'running', True):
+                    continue
+                
+    def add_message(self, sender, message, is_own):
+        timestamp = datetime.now().strftime('%H:%M')
+        bubble = MessageBubble(message, is_own, sender, timestamp)
         
-        timestamp = datetime.now().strftime('%H:%M:%S')
-        
-        # Форматирование сообщения
-        self.messages_area.insert(tk.END, f"[{timestamp}] ", 'timestamp')
-        
-        # Выделяем цветом в зависимости от отправителя
-        if sender == self.workstation_id:
-            self.messages_area.insert(tk.END, f"{sender}: ", 'my_message')
+        # Добавляем сообщение в layout
+        if is_own:
+            bubble_layout = QHBoxLayout()
+            bubble_layout.addStretch()
+            bubble_layout.addWidget(bubble)
+            self.messages_layout.addLayout(bubble_layout)
         else:
-            self.messages_area.insert(tk.END, f"{sender}: ", 'sender')
+            bubble_layout = QHBoxLayout()
+            bubble_layout.addWidget(bubble)
+            bubble_layout.addStretch()
+            self.messages_layout.addLayout(bubble_layout)
             
-        self.messages_area.insert(tk.END, f"{message}\n", 'message')
+        # Прокручиваем к низу
+        QTimer.singleShot(50, self.scroll_to_bottom)
         
-        self.messages_area.configure(state='disabled')
-        self.messages_area.see(tk.END)
-    
     def add_system_message(self, message):
-        """Добавление системного сообщения"""
-        self.messages_area.configure(state='normal')
+        system_label = QLabel(f"⚡ {message}")
+        system_label.setAlignment(Qt.AlignCenter)
+        system_label.setStyleSheet("""
+            QLabel {
+                color: #ffb74d;
+                font-size: 12px;
+                font-style: italic;
+                padding: 10px;
+                background: rgba(255,183,77,0.1);
+                border-radius: 10px;
+            }
+        """)
+        system_label.setMaximumWidth(300)
         
-        self.messages_area.insert(tk.END, f"● {message}\n", 'system')
+        system_layout = QHBoxLayout()
+        system_layout.addStretch()
+        system_layout.addWidget(system_label)
+        system_layout.addStretch()
+        self.messages_layout.addLayout(system_layout)
         
-        self.messages_area.configure(state='disabled')
-        self.messages_area.see(tk.END)
-    
-    def on_closing(self):
-        """Обработка закрытия приложения"""
-        self.running = False
+    def scroll_to_bottom(self):
+        scrollbar = self.scroll_area.verticalScrollBar()
+        scrollbar.setValue(scrollbar.maximum())
+        
+    def closeEvent(self, event):
         if self.messenger:
-            self.messenger.running = False
-            self.messenger.sock.close()
-        self.root.destroy()
+            self.messenger.close()
+        event.accept()
 
 class MulticastMessenger:
     def __init__(self, workstation_id, multicast_group='224.1.1.1', port=5007):
@@ -231,65 +537,71 @@ class MulticastMessenger:
         self.port = port
         self.running = True
         
-        # Создаем отдельный сокет для отправки
-        self.send_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        # Создаем UDP сокет
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         
-        # Устанавливаем TTL для multicast пакетов
-        ttl = struct.pack('b', 1)  # TTL = 1 (только локальная сеть)
-        self.send_sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, ttl)
+        # Устанавливаем timeout для избежания блокировки
+        self.sock.settimeout(1.0)
         
-        # Создаем отдельный сокет для приема
-        self.recv_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.recv_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        # Устанавливаем TTL для multicast
+        ttl = struct.pack('b', 1)
+        self.sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, ttl)
         
-        # Присоединение к multicast группе для приема
+        # Присоединяемся к multicast группе
         self.join_multicast_group()
         
     def join_multicast_group(self):
-        """Присоединение к multicast группе"""
-        # Привязываем сокет к порту
-        self.recv_sock.bind(('', self.port))
-        
-        # Добавляем в multicast группу
-        group = socket.inet_aton(self.multicast_group)
-        mreq = struct.pack('4sL', group, socket.INADDR_ANY)
-        self.recv_sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+        try:
+            self.sock.bind(('', self.port))
+            group = socket.inet_aton(self.multicast_group)
+            mreq = struct.pack('4sL', group, socket.INADDR_ANY)
+            self.sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+        except Exception as e:
+            raise Exception(f"Не удалось присоединиться к multicast группе: {str(e)}")
     
     def send_message(self, message):
-        """Отправка сообщения в multicast группу"""
         try:
             message_data = f"{self.workstation_id}:{message}"
-            self.send_sock.sendto(
+            self.sock.sendto(
                 message_data.encode('utf-8'), 
                 (self.multicast_group, self.port)
             )
         except Exception as e:
-            print(f"Ошибка отправки: {e}")
+            raise Exception(f"Ошибка отправки сообщения: {str(e)}")
     
-    @property
-    def sock(self):
-        """Свойство для обратной совместимости"""
-        return self.recv_sock
+    def close(self):
+        self.running = False
+        try:
+            self.sock.close()
+        except:
+            pass
 
-def main():
-    root = tk.Tk()
-    app = ChimMessenger(root)
-    
-    # Настройка тегов для форматирования текста
-    app.messages_area.tag_configure('timestamp', foreground='#78909c')
-    app.messages_area.tag_configure('sender', foreground='#4fc3f7', font=('Arial', 10, 'bold'))
-    app.messages_area.tag_configure('my_message', foreground='#81c784', font=('Arial', 10, 'bold'))
-    app.messages_area.tag_configure('message', foreground='#e0e0e0')
-    app.messages_area.tag_configure('system', foreground='#ffb74d', font=('Arial', 9, 'italic'))
-    
-    # Обработка закрытия окна
-    root.protocol("WM_DELETE_WINDOW", app.on_closing)
-    
-    # Установка фокуса на поле ввода идентификатора
-    app.id_entry.focus_set()
-    
-    root.mainloop()
+class MessengerApp:
+    def __init__(self):
+        self.app = QApplication(sys.argv)
+        
+        # Устанавливаем стиль приложения
+        self.app.setStyle('Fusion')
+        
+        self.login_window = LoginWindow()
+        self.chat_window = None
+        
+        self.login_window.login_success.connect(self.open_chat)
+        
+    def run(self):
+        self.login_window.show()
+        return self.app.exec_()
+        
+    def open_chat(self, username):
+        self.login_window.close()
+        self.chat_window = ChatWindow(username)
+        self.chat_window.show()
 
 if __name__ == "__main__":
-    main()
-
+    # Добавляем фильтр для игнорирования предупреждений
+    import warnings
+    warnings.filterwarnings("ignore", category=DeprecationWarning)
+    
+    messenger = MessengerApp()
+    sys.exit(messenger.run())
